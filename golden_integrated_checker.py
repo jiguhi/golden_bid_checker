@@ -287,160 +287,66 @@ def parse_shopping(root, mobile):
 
 
 def parse_shopping_pc_live(page):
-    """PC 쇼핑은 현재 DOM에서 카드 순서를 직접 읽습니다.
+    """PC 쇼핑 광고를 현재 DOM의 data-slog-content 기준으로 읽습니다.
 
-    PC 네이버 쇼핑은 같은 화면에서도 판매자 텍스트가 일반 요소로
-    렌더링되거나 쇼핑 브리지 링크로만 남는 경우가 있어, HTMLParser
-    결과만으로는 정상 카드가 판독불가가 될 수 있습니다.
+    상품명/소재ID로 판매자를 추정하지 않습니다. 각 광고 카드 안에서 화면에
+    실제 표시된 판매자 링크 텍스트만 사용해 TARGET_SELLER를 판별합니다.
     """
     try:
         data = page.evaluate(r"""
 () => {
     const norm = value => String(value || "").replace(/\s+/g, " ").trim();
-    const sectionTitle = value => {
-        const text = norm(value);
-        return text === "네이버 가격비교" || text === "네이버 쇼핑 인기상품";
-    };
 
-    const headings = Array.from(
-        document.querySelectorAll("h1,h2,h3,h4,span,strong,a,div")
-    );
-    const heading = headings.find(node => sectionTitle(node.innerText || node.textContent));
-    let section = heading ? heading.closest("section") : null;
+    // 실제 네이버 PC 쇼핑 광고 카드: shp_gui:nad-... 형태.
+    // data-slog-visible=true가 있으면 현재 노출 카드만 우선 사용합니다.
+    let cards = Array.from(document.querySelectorAll('li[data-slog-content*="shp_gui:nad-"]'));
+    const visible = cards.filter(card => card.getAttribute('data-slog-visible') === 'true');
+    if (visible.length) cards = visible;
 
-    if (!section) {
-        section = Array.from(document.querySelectorAll("section")).find(node => {
-            const text = norm(node.innerText || node.textContent);
-            return text.includes("네이버 가격비교") || text.includes("네이버 쇼핑 인기상품");
-        }) || null;
-    }
+    const rows = [];
+    for (const card of cards) {
+        const slog = norm(card.getAttribute('data-slog-content'));
+        const anchors = Array.from(card.querySelectorAll('a'));
 
-    if (!section) {
-        return {ok: false, reason: "PC 쇼핑 영역 없음"};
-    }
+        // 중요: 상품명 전체 innerText에서 "황금이네"를 찾지 않습니다.
+        // <a> 자체의 표시 텍스트가 정확히 판매자명과 같은 경우만 대상 판매자로 인정합니다.
+        const targetAnchor = anchors.find(a => norm(a.innerText || a.textContent) === "황금이네") || null;
 
-    // PC의 flicking-camera는 브랜드 필터이고, 상품 카드는 별도 ul입니다.
-    const lists = Array.from(section.querySelectorAll("ul"));
-    const cardList = lists.find(list => {
-        const items = Array.from(list.children)
-            .filter(node => node.tagName === "LI");
-        return items.some(item => {
-            const text = norm(item.innerText || item.textContent);
-            return (
-                text.length >= 40
-                || text.includes("광고")
-                || item.querySelector('[id^="view_type_guide_"]')
-            );
-        });
-    });
-    const scope = cardList || section;
+        // 디버그용 판매자 후보. 짧은 단독 링크 텍스트만 수집하며 가격/상품명 형태는 제외합니다.
+        const sellerLinks = anchors
+            .map(a => norm(a.innerText || a.textContent))
+            .filter(text => text && text.length <= 30)
+            .filter(text => !/^[\d,]+원?$/.test(text))
+            .filter(text => !["광고", "광고+", "공식", "무료배송", "오늘출발"].includes(text));
 
-    const labels = Array.from(scope.querySelectorAll("*")).filter(node => {
-        const text = norm(node.innerText || node.textContent);
-        return text.startsWith("광고");
-    });
+        // 화면에서 판매자 링크를 정확히 찾았으면 그 값을 사용.
+        // 대상 판매자가 아니더라도 후보가 있으면 첫 짧은 링크를 진단용으로 남깁니다.
+        const seller = targetAnchor ? "황금이네" : (sellerLinks[0] || "");
 
-    const cards = [];
-    const seen = new Set();
+        const title = Array.from(card.querySelectorAll('a, strong'))
+            .map(n => norm(n.innerText || n.textContent))
+            .find(text => text.length > 30) || "";
 
-    for (const label of labels) {
-        const card = label.closest("li");
-        if (!card || seen.has(card)) continue;
-        seen.add(card);
-
-        const descendants = [card, ...card.querySelectorAll("*")];
-        const values = [];
-
-        for (const node of descendants) {
-            for (const name of ["id", "href", "onclick", "data-slog-content"]) {
-                const value = node.getAttribute && node.getAttribute(name);
-                if (value) values.push(value);
-            }
-        }
-
-        const ids = Array.from(new Set(values.join(" ").match(/nad-[A-Za-z0-9-]+/g) || []));
-        const productIds = Array.from(new Set(
-            descendants
-                .map(node => node.id || "")
-                .filter(value => value.startsWith("view_type_guide_"))
-                .map(value => value.replace("view_type_guide_", ""))
-        ));
-
-        const plausibleSeller = value => {
-            const text = norm(value);
-            if (!text || text.length > 40) return false;
-            if (["광고", "광고+", "공식", "무료배송", "오늘출발", "네이버플러스멤버십"].includes(text)) return false;
-            if (/^[\d,]+원?$/.test(text)) return false;
-            return true;
-        };
-
-        // 판매자명은 현재 화면 DOM에서만 읽습니다.
-        // 소재 ID / 상품 ID / 대상 상품정보는 판매자 판별에 사용하지 않습니다.
-        const sellerCandidates = [];
-        const pushSeller = value => {
-            const text = norm(value);
-            if (plausibleSeller(text) && !sellerCandidates.includes(text)) {
-                sellerCandidates.push(text);
-            }
-        };
-
-        for (const node of descendants) {
-            const cls = typeof node.className === "string" ? node.className : "";
-            const text = norm(node.innerText || node.textContent);
-            const aria = norm(node.getAttribute && node.getAttribute("aria-label"));
-            const titleAttr = norm(node.getAttribute && node.getAttribute("title"));
-            const href = norm(node.getAttribute && node.getAttribute("href"));
-
-            if (/seller|mall|store|shop/i.test(cls)) {
-                pushSeller(text);
-            }
-
-            for (const labeled of [aria, titleAttr]) {
-                const match = labeled.match(/(?:판매자|판매처|스토어|쇼핑몰)\s*[:：]?\s*(.{1,40})$/);
-                if (match) pushSeller(match[1]);
-            }
-
-            if (node.tagName === "A" && /(?:smartstore\.naver\.com|storefarm\.naver\.com)/i.test(href)) {
-                pushSeller(text);
-            }
-        }
-
-        // 이전 PC 화면에서 확인된 판매자 클래스가 있으면 최우선.
-        const knownSeller = Array.from(card.querySelectorAll(".PtxugWXH"))
-            .map(node => norm(node.innerText || node.textContent))
-            .find(plausibleSeller) || "";
-
-        // 후보가 없더라도 화면에 '황금이네'라는 판매자 텍스트가 정확히 존재하면 인정.
-        const exactTargetNode = descendants.find(node => norm(node.innerText || node.textContent) === "황금이네");
-        const seller = knownSeller || sellerCandidates[0] || (exactTargetNode ? "황금이네" : "");
-
-        const title = (
-            Array.from(card.querySelectorAll("img[alt],strong"))
-                .map(node => norm(node.alt || node.innerText || node.textContent))
-                .find(value => value.length > 3) || ""
-        );
-
-        cards.push({
-            ad_plus: descendants.some(node => [node.textContent, node.getAttribute("aria-label"), node.getAttribute("title")].some(value => /^광고\s*[+＋]$/.test(norm(value))))
-                || descendants.some(node => node.tagName === "BUTTON" && norm(node.textContent) === "광고"
-                    && Array.from(node.querySelectorAll("svg path")).some(path => (path.getAttribute("d") || "").replace(/[\s,]+/g, "") === "M297.5v-3h-1v3h-3v1h3v3h1v-3h3v-1z")),
-            ad_id: ids.length === 1 ? ids[0] : "",
-            product_id: productIds.length === 1 ? productIds[0] : "",
+        rows.push({
             seller,
+            target_found: !!targetAnchor,
             title,
+            slog,
             top: card.getBoundingClientRect().top,
             left: card.getBoundingClientRect().left,
         });
     }
 
-    // PC 쇼핑은 DOM 순서와 화면 순서가 달라지는 경우가 있어
-    // 실제 화면의 위→아래, 왼쪽→오른쪽 순서로 정렬합니다.
-    cards.sort((a, b) => {
+    rows.sort((a, b) => {
         const sameRow = Math.abs(a.top - b.top) < 20;
         return sameRow ? a.left - b.left : a.top - b.top;
     });
 
-    return {ok: cards.length > 0, reason: cards.length ? "" : "PC 쇼핑 광고 카드 없음", cards};
+    return {
+        ok: rows.length > 0,
+        reason: rows.length ? "" : "data-slog-content 기준 PC 쇼핑 광고 카드 없음",
+        cards: rows,
+    };
 }
 """)
 
@@ -453,9 +359,19 @@ def parse_shopping_pc_live(page):
             item["rank"] = rank
             item.pop("top", None)
             item.pop("left", None)
+            # 판매자 판별에는 상품/소재 ID를 사용하지 않음.
+            item["ad_id"] = ""
+            item["product_id"] = ""
+            item["ad_plus"] = False
             cards.append(item)
 
-        return filter_shopping_cards(cards)
+        # 광고 카드가 정상 검출된 경우 황금이네 exact seller link가 없으면 미노출로 판단할 수 있도록
+        # 비대상 카드의 빈 seller를 명시적인 다른 판매자로 채웁니다.
+        for item in cards:
+            if not item.get("target_found") and not clean(item.get("seller")):
+                item["seller"] = "(다른 판매자)"
+
+        return outcome("확인", cards=cards)
     except Exception as error:
         return outcome("판독불가", reason=f"PC DOM 판독 오류: {type(error).__name__}")
 
