@@ -25,6 +25,8 @@ CONFIG_FILE = BASE_DIR / "naver_searchad_config.json"
 AUTH_STATE_FILE = Path(os.environ.get("GOLDEN_AUTH_STATE_FILE", str(BASE_DIR / ".auth" / "naver_auth_state.json")))
 RESULT_DIR = BASE_DIR / "results"
 DEBUG_DIR = BASE_DIR / "debug"
+DEBUG_CAPTURE_ALL = os.environ.get("GOLDEN_DEBUG_CAPTURE_ALL", "0") == "1"
+DEBUG_MAX_CARDS = 12
 JOURNAL_FILE = RESULT_DIR / "bid_history.jsonl"
 TARGET_SELLER = "황금이네"
 TARGET_STORE = "smartstore.naver.com/goldhouse"
@@ -502,6 +504,18 @@ def display(result):
     return "미노출(조회범위)" if all(c["seller"] for c in result["cards"]) else "판매자 확인불가"
 
 
+def debug_result_summary(label, result):
+    """순위 판정에 사용된 카드/판매자 값을 로그에 그대로 표시합니다."""
+    cards = result.get("cards") or []
+    print(f"  [진단] {label}: status={result.get('status')} / cards={len(cards)} / reason={result.get('reason','') or '-'}")
+    for card in cards[:DEBUG_MAX_CARDS]:
+        seller = clean(card.get("seller")) or "<빈값>"
+        title = clean(card.get("title"))[:80]
+        print(f"    - {card.get('rank','?')}위 | seller={seller} | title={title}")
+    if len(cards) > DEBUG_MAX_CARDS:
+        print(f"    ... {len(cards)-DEBUG_MAX_CARDS}개 카드 생략")
+
+
 class StopRun(RuntimeError):
     pass
 
@@ -634,8 +648,10 @@ def save_debug(page, keyword, device):
         path.with_suffix(".html").write_text(read_page_html(page, timeout_ms=3000), encoding="utf-8")
         page.screenshot(path=str(path.with_suffix(".png")), full_page=False, timeout=5000)
         print("  진단 파일:", path.name)
+        return {"html": str(path.with_suffix(".html")), "png": str(path.with_suffix(".png"))}
     except Exception as error:
         print("  진단 저장 실패:", type(error).__name__)
+        return None
 
 
 def scan(page, keyword, mobile):
@@ -667,8 +683,15 @@ def scan(page, keyword, mobile):
             page.wait_for_timeout(600)  # 재검색 없이 현재 DOM만 한 번 더 확인
         if any(r["status"] != "확인" for r in results):
             save_debug(page, keyword, "Mobile" if mobile else "PC")
+        debug_result_summary("쇼핑검색 " + ("Mobile" if mobile else "PC"), results[0])
+        debug_result_summary("파워링크 " + ("Mobile" if mobile else "PC"), results[1])
+        capture = None
+        if DEBUG_CAPTURE_ALL:
+            capture = save_debug(page, keyword, "Mobile" if mobile else "PC")
         for result in results:
             result["observed_at"] = time.time()
+            if capture:
+                result["debug_capture"] = capture
         return results
     except StopRun:
         save_debug(page, keyword, "Mobile" if mobile else "PC")
