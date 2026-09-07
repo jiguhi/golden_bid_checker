@@ -665,16 +665,59 @@ def _connect_existing_chrome(p):
     return browser, context
 
 
+def _verify_naver_login_ui(page, context):
+    """쿠키 존재뿐 아니라 네이버 홈 DOM의 로그인 완료 표식까지 확인합니다."""
+    print("[로그인 검증] 1/3 저장된 NID_AUT / NID_SES 확인 중...")
+    if not logged_in(context):
+        raise StopRun("[로그인 검증 실패] NID_AUT / NID_SES가 없거나 만료되었습니다. 로그인 상태를 다시 등록하세요.")
+    print("[로그인 검증] ✓ NID_AUT / NID_SES 유효 쿠키 존재")
+
+    print("[로그인 검증] 2/3 네이버 홈 실제 로그인 상태 확인 중...")
+    html = read_page_html(page, timeout_ms=5000)
+    root = Document(html).root
+    security_check(root)
+    if explicit_login_page(page, root):
+        raise StopRun("[로그인 검증 실패] 네이버가 실제 로그인 화면을 반환했습니다. 로그인 상태를 다시 등록하세요.")
+
+    # 네이버 홈의 로그인 완료 상태에는 로그아웃 링크/문구가 노출됩니다.
+    # CSS 클래스명은 수시로 바뀌므로 고정 class selector는 사용하지 않습니다.
+    low = html.lower()
+    text = clean(root.text())
+    ui_markers = (
+        "nidlogin.logout",
+        "nid.naver.com/nidlogin.logout",
+        "로그아웃",
+    )
+    ui_ok = any(marker in low if marker.isascii() else marker in text for marker in ui_markers)
+    if not ui_ok:
+        # 동적 로그인 위젯이 늦게 렌더링되는 경우 짧게 재확인합니다.
+        for delay in (500, 1000, 1500):
+            page.wait_for_timeout(delay)
+            html = read_page_html(page, timeout_ms=5000)
+            root = Document(html).root
+            security_check(root)
+            low = html.lower()
+            text = clean(root.text())
+            if any(marker in low if marker.isascii() else marker in text for marker in ui_markers):
+                ui_ok = True
+                break
+
+    if not ui_ok:
+        raise StopRun(
+            "[로그인 검증 실패] 쿠키는 존재하지만 네이버 홈에서 실제 로그인 완료 상태를 확인하지 못했습니다. "
+            "저장 세션이 서버 환경에서 유효하지 않을 수 있습니다. 로그인 상태를 다시 등록하세요."
+        )
+    print("[로그인 검증] ✓ 네이버 홈 DOM에서 실제 로그인 상태 확인")
+    print("[로그인 검증] 3/3 ✓ 로그인 계정 세션으로 검색을 시작합니다.")
+
+
 def _ensure_login_ready(pc, context):
-    # 이미 네이버 페이지가 열려 있어도 홈에서 세션 상태를 한 번 명확히 확인합니다.
+    # 저장 세션을 적용한 뒤 네이버 홈에서 쿠키 + 실제 UI 상태를 모두 검증합니다.
     response = pc.goto("https://www.naver.com/", wait_until="domcontentloaded", timeout=30000)
     if response and response.status >= 400:
         raise StopRun(f"네이버 홈 접근 오류 HTTP {response.status}")
-    security_check(Document(read_page_html(pc)).root)
-    if not logged_in(context):
-        print("열린 Chrome에서 직접 로그인하세요. 비밀번호는 프로그램에 입력하지 마세요.")
-        input("로그인 후 네이버 홈이 보이면 이 CMD에서 Enter > ")
     wait_for_login(pc, context)
+    _verify_naver_login_ui(pc, context)
 
 
 def _launch_saved_state_browser(p):
@@ -728,7 +771,7 @@ def collect(keywords):
             pages = [page for page in context.pages if not page.is_closed()]
             pc = pages[0] if pages else context.new_page()
             _ensure_login_ready(pc, context)
-            print("네이버 로그인 쿠키 확인 완료. PC/Mobile은 동일 로그인 세션을 공유합니다.")
+            print("네이버 실제 로그인 상태 확인 완료. PC/Mobile은 동일 로그인 세션을 공유합니다.")
 
             print(f"\n=== 1단계: PC 전체 조회 ({len(keywords)}개) ===")
             for index, keyword in enumerate(keywords, 1):
