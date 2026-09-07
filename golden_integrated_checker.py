@@ -224,17 +224,52 @@ def parse_shopping(root, mobile):
         aid = ad_id(node)
         guide = next((n for n in children if (n.attrs.get("id") or "").startswith("view_type_guide_")), None)
         pid = guide.attrs["id"].replace("view_type_guide_", "") if guide else ""
-        seller_nodes = [n for n in children if n.cls("PtxugWXH")]
-        seller = clean(seller_nodes[0].text()) if seller_nodes else ""
-        if not seller and not mobile:
-            seller = next((TARGET_SELLER for n in children if clean(n.text()) == TARGET_SELLER or store_match(n.attrs.get("href")) or store_match(n.attrs.get("onclick")) or store_match(n.text())), "")
-        if not seller and not mobile:
-            for child in children:
-                text = clean(child.text())
-                match = re.match(r"^(.{1,30}?)광고(?:\s*공식)?", text)
-                if match and clean(match.group(1)):
-                    seller = clean(match.group(1))
-                    break
+        # 판매자 판별은 화면에 렌더링된 판매자명만 사용합니다.
+        # 소재 ID / 상품 ID는 판매자명 판별에 사용하지 않습니다.
+        def plausible_seller(value):
+            value = clean(value)
+            if not value or len(value) > 40:
+                return False
+            if value in {"광고", "광고+", "공식", "무료배송", "오늘출발", "네이버플러스멤버십"}:
+                return False
+            if re.fullmatch(r"[\d,]+원?", value):
+                return False
+            return True
+
+        seller = ""
+        seller_candidates = []
+        for child in children:
+            cls_text = " ".join(child.attrs.get("class", []) if isinstance(child.attrs.get("class"), list) else [child.attrs.get("class", "")])
+            text = clean(child.text())
+            aria = clean(child.attrs.get("aria-label", ""))
+            title_attr = clean(child.attrs.get("title", ""))
+            href = unquote(child.attrs.get("href", "") or "")
+
+            # 네이버가 클래스명을 변경하더라도 seller/mall/store/shop 계열 클래스는 우선 후보로 사용.
+            if re.search(r"seller|mall|store|shop", cls_text, re.I) and plausible_seller(text):
+                seller_candidates.append(text)
+
+            # 판매자/판매처/스토어/쇼핑몰 라벨이 붙은 요소.
+            for labeled in (aria, title_attr):
+                m = re.search(r"(?:판매자|판매처|스토어|쇼핑몰)\s*[:：]?\s*(.{1,40})$", labeled)
+                if m and plausible_seller(m.group(1)):
+                    seller_candidates.append(clean(m.group(1)))
+
+            # 스마트스토어/스토어팜으로 직접 연결되는 링크의 화면 텍스트.
+            if child.tag == "a" and re.search(r"(?:smartstore\.naver\.com|storefarm\.naver\.com)", href, re.I) and plausible_seller(text):
+                seller_candidates.append(text)
+
+        # 기존에 확인된 네이버 쇼핑 판매자 클래스도 가장 먼저 사용.
+        known_nodes = [n for n in children if n.cls("PtxugWXH") and plausible_seller(n.text())]
+        if known_nodes:
+            seller = clean(known_nodes[0].text())
+        elif seller_candidates:
+            seller = seller_candidates[0]
+
+        # 마지막 안전 보완: 화면에 판매자명 '황금이네'가 정확히 보이면 인정.
+        # 상품/소재 ID나 특정 상품 정보는 사용하지 않습니다.
+        if not seller:
+            seller = next((TARGET_SELLER for n in children if clean(n.text()) == TARGET_SELLER), "")
         title = next((clean(n.text()) for n in children if n.tag == "strong" and len(clean(n.text())) > 3), "")
         identity = aid or pid
         if not identity and (mobile or not seller and not title):
@@ -329,14 +364,54 @@ def parse_shopping_pc_live(page):
                 .map(value => value.replace("view_type_guide_", ""))
         ));
 
-        const cardText = norm(card.innerText || card.textContent);
-        const targetText = cardText.includes("황금이네");
-        const targetStore = Array.from(card.querySelectorAll("a")).some(anchor => {
-            const values = [anchor.href || "", anchor.getAttribute("href") || "", anchor.getAttribute("onclick") || ""];
-            return values.some(value => /smartstore\.naver\.com\/goldhouse/i.test(value));
-        });
+        const plausibleSeller = value => {
+            const text = norm(value);
+            if (!text || text.length > 40) return false;
+            if (["광고", "광고+", "공식", "무료배송", "오늘출발", "네이버플러스멤버십"].includes(text)) return false;
+            if (/^[\d,]+원?$/.test(text)) return false;
+            return true;
+        };
 
-        const targetSeller = targetText || targetStore;
+        // 판매자명은 현재 화면 DOM에서만 읽습니다.
+        // 소재 ID / 상품 ID / 대상 상품정보는 판매자 판별에 사용하지 않습니다.
+        const sellerCandidates = [];
+        const pushSeller = value => {
+            const text = norm(value);
+            if (plausibleSeller(text) && !sellerCandidates.includes(text)) {
+                sellerCandidates.push(text);
+            }
+        };
+
+        for (const node of descendants) {
+            const cls = typeof node.className === "string" ? node.className : "";
+            const text = norm(node.innerText || node.textContent);
+            const aria = norm(node.getAttribute && node.getAttribute("aria-label"));
+            const titleAttr = norm(node.getAttribute && node.getAttribute("title"));
+            const href = norm(node.getAttribute && node.getAttribute("href"));
+
+            if (/seller|mall|store|shop/i.test(cls)) {
+                pushSeller(text);
+            }
+
+            for (const labeled of [aria, titleAttr]) {
+                const match = labeled.match(/(?:판매자|판매처|스토어|쇼핑몰)\s*[:：]?\s*(.{1,40})$/);
+                if (match) pushSeller(match[1]);
+            }
+
+            if (node.tagName === "A" && /(?:smartstore\.naver\.com|storefarm\.naver\.com)/i.test(href)) {
+                pushSeller(text);
+            }
+        }
+
+        // 이전 PC 화면에서 확인된 판매자 클래스가 있으면 최우선.
+        const knownSeller = Array.from(card.querySelectorAll(".PtxugWXH"))
+            .map(node => norm(node.innerText || node.textContent))
+            .find(plausibleSeller) || "";
+
+        // 후보가 없더라도 화면에 '황금이네'라는 판매자 텍스트가 정확히 존재하면 인정.
+        const exactTargetNode = descendants.find(node => norm(node.innerText || node.textContent) === "황금이네");
+        const seller = knownSeller || sellerCandidates[0] || (exactTargetNode ? "황금이네" : "");
+
         const title = (
             Array.from(card.querySelectorAll("img[alt],strong"))
                 .map(node => norm(node.alt || node.innerText || node.textContent))
@@ -349,7 +424,7 @@ def parse_shopping_pc_live(page):
                     && Array.from(node.querySelectorAll("svg path")).some(path => (path.getAttribute("d") || "").replace(/[\s,]+/g, "") === "M297.5v-3h-1v3h-3v1h3v3h1v-3h3v-1z")),
             ad_id: ids.length === 1 ? ids[0] : "",
             product_id: productIds.length === 1 ? productIds[0] : "",
-            seller: targetSeller ? "황금이네" : "",
+            seller,
             title,
             top: card.getBoundingClientRect().top,
             left: card.getBoundingClientRect().left,
