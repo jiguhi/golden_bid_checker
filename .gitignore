@@ -1,0 +1,20 @@
+# secrets / login session
+.streamlit/secrets.toml
+naver_searchad_config.json
+naver_auth_state.json
+.auth/
+chrome_profile/
+.env
+
+# runtime
+results/
+debug/
+*.log
+*.lock
+__pycache__/
+*.pyc
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
