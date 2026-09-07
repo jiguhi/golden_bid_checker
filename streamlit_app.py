@@ -51,6 +51,7 @@ os.environ.setdefault("NAVER_SEARCHAD_API_KEY", _secret("naver_searchad", "api_k
 os.environ.setdefault("NAVER_SEARCHAD_SECRET_KEY", _secret("naver_searchad", "secret_key"))
 os.environ["GOLDEN_BROWSER_MODE"] = "state"
 os.environ["GOLDEN_AUTH_STATE_FILE"] = str(AUTH_FILE)
+os.environ.setdefault("GOLDEN_DEBUG_CAPTURE_ALL", "0")
 
 import golden_integrated_checker as core
 from auth_store import AuthStore
@@ -165,7 +166,7 @@ def make_excel_bytes(results):
 
 
 def state_init():
-    defaults = {"results": None, "plan": None, "stamp": None, "scan_log": "", "plan_log": "", "apply_log": "", "auth_message": ""}
+    defaults = {"results": None, "plan": None, "stamp": None, "scan_log": "", "plan_log": "", "apply_log": "", "auth_message": "", "debug_mode": False}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
@@ -246,9 +247,16 @@ with c1:
 with c2:
     device_delay = st.number_input("PC → Mobile 전환 대기(초)", min_value=0.0, max_value=120.0, value=float(core.BETWEEN_DEVICE_BATCH_SECONDS), step=5.0)
 
+st.session_state.debug_mode = st.checkbox(
+    "디버그 모드 (서버가 실제로 본 검색화면과 감지 판매자 확인)",
+    value=bool(st.session_state.debug_mode),
+    help="문제 확인용입니다. 조회한 각 키워드의 검색결과 화면을 캡처하고 감지된 판매자명을 로그에 표시합니다.",
+)
+
 if st.button("순위 조회 시작", type="primary", disabled=not selected_keywords):
     core.BETWEEN_KEYWORD_SECONDS = float(keyword_delay)
     core.BETWEEN_DEVICE_BATCH_SECONDS = float(device_delay)
+    core.DEBUG_CAPTURE_ALL = bool(st.session_state.debug_mode)
     st.session_state.plan = None
     log_box = st.empty(); logger = LiveLog(log_box)
     try:
@@ -272,6 +280,28 @@ if st.session_state.results:
     st.download_button("순위 결과 Excel 다운로드", data=make_excel_bytes(st.session_state.results), file_name=f"황금이네_통합순위_{st.session_state.stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with st.expander("조회 로그"):
         st.code(st.session_state.scan_log or "로그 없음", language=None)
+
+    if st.session_state.debug_mode:
+        st.markdown("#### 서버 검색화면 진단")
+        st.caption("아래 이미지는 Streamlit 서버의 Chromium이 실제로 본 화면입니다. 로그인/검색결과/광고 노출 차이를 여기서 확인할 수 있습니다.")
+        shown = set()
+        for row in st.session_state.results:
+            for surface, result in row.get("surfaces", {}).items():
+                cap = (result or {}).get("debug_capture") or {}
+                png = cap.get("png")
+                if png and png not in shown and Path(png).exists():
+                    shown.add(png)
+                    st.markdown(f"**{row['keyword']} · {'Mobile' if 'Mobile' in surface else 'PC'}**")
+                    st.image(png, use_container_width=True)
+                    html = cap.get("html")
+                    if html and Path(html).exists():
+                        st.download_button(
+                            f"{row['keyword']} HTML 진단파일 다운로드",
+                            data=Path(html).read_bytes(),
+                            file_name=Path(html).name,
+                            mime="text/html",
+                            key=f"dbg_{len(shown)}",
+                        )
 
 st.subheader("2. 입찰 변경 계획")
 if not st.session_state.results:
